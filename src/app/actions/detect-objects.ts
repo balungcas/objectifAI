@@ -1,6 +1,7 @@
 'use server';
 
 import { correctLabels, CorrectLabelsInput } from '@/ai/flows/correct-labels';
+import { detectObjectsInImage, DetectObjectsInput } from '@/ai/flows/detect-objects-flow';
 import type { DetectedObject } from '@/types';
 
 // Helper function to convert File to base64
@@ -24,47 +25,46 @@ export async function detectObjectsAction(
   }
 
   try {
-    const imageUrl = await fileToDataUrl(imageFile);
+    const imageDataUri = await fileToDataUrl(imageFile);
 
-    // Simulate initial object detection (replace with actual model if available)
-    // These are relative coordinates [x1, y1, x2, y2] from 0 to 1
-    const simulatedDetections: DetectedObject[] = [
-      {
-        box: [0.1, 0.1, 0.5, 0.6], // x1, y1, x2, y2 (relative)
-        class: 'Object A',
-        confidence: 0.85,
-      },
-      {
-        box: [0.6, 0.3, 0.9, 0.8], // x1, y1, x2, y2 (relative)
-        class: 'Item B',
-        confidence: 0.72,
-      },
-    ];
-
-    const aiInput: CorrectLabelsInput = {
-      imageUrl,
-      detectedObjects: simulatedDetections.map(obj => ({
-        ...obj,
-        // The AI flow expects box as simple number array.
-        // If it expects absolute coords, this needs adjustment based on original image dimensions.
-        // For now, passing relative coords and assuming AI flow handles or ignores scaling.
-      })),
+    // Step 1: Perform initial object detection using the new AI flow
+    const detectionInput: DetectObjectsInput = {
+      imageDataUri,
     };
-
-    const correctedObjectsResponse = await correctLabels(aiInput);
+    const initialDetectionsResponse = await detectObjectsInImage(detectionInput);
     
-    // Ensure the output from AI matches our DetectedObject structure, especially the box.
-    // The AI flow is defined to return box as number[4], class string, confidence number.
-    const correctedObjects: DetectedObject[] = correctedObjectsResponse.map(obj => ({
-        box: obj.box as [number, number, number, number], // Assuming AI returns valid box array
+    // Map AI response to DetectedObject structure, ensuring types.
+    // The schemas for detectObjectsInImage output and DetectedObject type are aligned.
+    const initialDetectedObjects: DetectedObject[] = initialDetectionsResponse.map(obj => ({
+        box: obj.box as [number, number, number, number], 
         class: obj.class,
         confidence: obj.confidence,
     }));
 
+    // Step 2: Pass initial detections to the label correction flow
+    const correctionInput: CorrectLabelsInput = {
+      imageDataUri, 
+      detectedObjects: initialDetectedObjects, 
+    };
 
-    return { correctedObjects, imageUrl };
+    const correctedObjectsResponse = await correctLabels(correctionInput);
+    
+    // Ensure the final output from AI matches our DetectedObject structure
+    const finalCorrectedObjects: DetectedObject[] = correctedObjectsResponse.map(obj => ({
+        box: obj.box as [number, number, number, number], 
+        class: obj.class,
+        confidence: obj.confidence,
+    }));
+
+    return { correctedObjects: finalCorrectedObjects, imageUrl: imageDataUri };
   } catch (error) {
     console.error('Error processing image:', error);
-    return { correctedObjects: [], imageUrl: '', error: 'Failed to process image. Please try again.' };
+    let errorMessage = 'Failed to process image. Please try again.';
+    if (error instanceof Error) {
+        errorMessage = error.message;
+    }
+    // It's good practice to check for Genkit-specific error details if available
+    // For example, error.cause or specific error properties from Genkit.
+    return { correctedObjects: [], imageUrl: '', error: errorMessage };
   }
 }

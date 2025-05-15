@@ -12,22 +12,24 @@ import {ai} from '@/ai/genkit';
 import {z} from 'genkit';
 
 const CorrectLabelsInputSchema = z.object({
-  imageUrl: z.string().describe('The URL of the image.'),
+  imageDataUri: z.string().describe(
+    "The image containing the objects, as a data URI that must include a MIME type and use Base64 encoding. Expected format: 'data:<mimetype>;base64,<encoded_data>'."
+  ),
   detectedObjects: z.array(
     z.object({
-      box: z.array(z.number()).length(4).describe('Bounding box coordinates [x1, y1, x2, y2].'),
+      box: z.array(z.number()).length(4).describe('Bounding box coordinates [x_min, y_min, x_max, y_max], normalized.'),
       class: z.string().describe('The predicted class label.'),
-      confidence: z.number().describe('The confidence score of the prediction.'),
+      confidence: z.number().min(0).max(1).describe('The confidence score of the prediction (0.0 to 1.0).'),
     })
-  ).describe('The list of detected objects with bounding boxes, classes, and confidences.'),
+  ).describe('The list of initially detected objects with bounding boxes, classes, and confidences.'),
 });
 export type CorrectLabelsInput = z.infer<typeof CorrectLabelsInputSchema>;
 
 const CorrectLabelsOutputSchema = z.array(
   z.object({
-    box: z.array(z.number()).length(4).describe('Bounding box coordinates [x1, y1, x2, y2].'),
+    box: z.array(z.number()).length(4).describe('Bounding box coordinates [x_min, y_min, x_max, y_max], normalized.'),
     class: z.string().describe('The corrected class label.'),
-    confidence: z.number().describe('The confidence score of the prediction.'),
+    confidence: z.number().min(0).max(1).describe('The confidence score of the prediction (can be original or adjusted, 0.0 to 1.0).'),
   })
 );
 export type CorrectLabelsOutput = z.infer<typeof CorrectLabelsOutputSchema>;
@@ -40,29 +42,37 @@ const correctLabelsPrompt = ai.definePrompt({
   name: 'correctLabelsPrompt',
   input: {schema: CorrectLabelsInputSchema},
   output: {schema: CorrectLabelsOutputSchema},
-  prompt: `You are an expert in object recognition. You will be provided with a list of objects detected in an image, along with their bounding boxes, predicted class labels, and confidence scores.
+  prompt: `You are an expert in object recognition and label refinement.
+You will be provided with an image and a list of objects that have already been detected in it, including their bounding boxes, initial class labels, and confidence scores.
 
-  Your task is to review the predicted class labels and correct them if necessary. Provide the corrected class labels in the same format as the input.
+Your task is to:
+1. Review the image and the initial detections.
+2. For each object, verify or correct its class label to be more accurate or specific if possible.
+3. Maintain the original bounding box. Adjust the confidence score if you make a significant correction to the label or if the initial confidence seems highly inaccurate for the (potentially corrected) label.
 
-  Here's the image URL: {{{imageUrl}}}
+Return the list of objects. Each object in the list must strictly follow this JSON structure:
+{
+  "box": [x_min, y_min, x_max, y_max], // Original normalized bounding box
+  "class": "Potentially_Corrected_Class_Name",
+  "confidence": original_or_adjusted_confidence_score // Between 0.0 and 1.0
+}
 
-  Here's the list of detected objects:
-  {{#each detectedObjects}}
-  - Box: {{{box}}}, Class: {{{class}}}, Confidence: {{{confidence}}}
-  {{/each}}
+Ensure the output is a valid JSON array of these objects. If an initial detection is completely erroneous and should be removed, you may omit it from the returned array. If no objects were provided or all are to be omitted, return an empty array.
 
-  Return the corrected list of objects with the same format as the input, only changing the class if it is incorrect.
-  [
-  {{#each detectedObjects}}
-    {
-      "box": [{{{box.0}}}, {{{box.1}}}, {{{box.2}}}, {{{box.3}}}]
-      "class": "Corrected Class Here",
-      "confidence": Confidence score here,
-    },
-  {{/each}}
-  ]
-  `,
+Image:
+{{media url=imageDataUri}}
+
+Initial Detections:
+{{#if detectedObjects.length}}
+{{#each detectedObjects}}
+- Box: [{{{box.[0]}}}, {{{box.[1]}}}, {{{box.[2]}}}, {{{box.[3]}}}], Class: "{{{class}}}", Confidence: {{{confidence}}}
+{{/each}}
+{{else}}
+- No initial objects detected.
+{{/if}}
+`,
 });
+
 
 const correctLabelsFlow = ai.defineFlow(
   {
@@ -70,8 +80,12 @@ const correctLabelsFlow = ai.defineFlow(
     inputSchema: CorrectLabelsInputSchema,
     outputSchema: CorrectLabelsOutputSchema,
   },
-  async input => {
+  async (input) => {
+    // If no objects detected initially, no need to correct, return empty array.
+    if (!input.detectedObjects || input.detectedObjects.length === 0) {
+      return [];
+    }
     const {output} = await correctLabelsPrompt(input);
-    return output!;
+    return output || []; // Ensure output is not null
   }
 );
